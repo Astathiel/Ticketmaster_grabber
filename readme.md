@@ -1,0 +1,1 @@
+Start the module on cmd chrome: "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir="C:\chrome_tm_profile" "https://www.ticketmaster.fi/artist/foo-fighters-lippuja/2990"
