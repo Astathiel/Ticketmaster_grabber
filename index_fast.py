@@ -14,6 +14,7 @@ logging.basicConfig(
 
 
 @dataclass
+# Edit config to match your needs
 class SniperConfig:
     cdp_endpoint: str = "http://127.0.0.1:9222"
     target_url_keyword: str = "ticketmaster.fi"
@@ -21,10 +22,10 @@ class SniperConfig:
     min_poll_sleep_seconds: float = 0.001
     max_poll_sleep_seconds: float = 0.002
     exclude_keywords: Tuple[str, ...] = (
-        "vip", "platinum", "hot ticket", "paketti",
+        "vip", "platinum", "paketti",
         "k18", "k-18", "k 18", "18+", "anniskelu", "ikäraja 18",
         "kenttä", "permanto", "seisomapaikka",
-        "golden circle", "pyörätuoli", "saattaja", "esteetön"
+        "pyörätuoli", "saattaja", "esteetön"
     )
     preferred_keywords: Tuple[str, ...] = (
         "peruslippu", "istumapaikat", "katsomo", "paikka", "normaali"
