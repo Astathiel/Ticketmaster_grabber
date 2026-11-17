@@ -99,6 +99,7 @@ class TicketPoller:
         self.page = page
         self.config = config
         self.stepper_set_to_target: bool = False
+        self.restricted_zone_keys: set = set()
 
     def is_in_basket(self) -> bool:
         current_url = self.page.url.lower()
@@ -110,9 +111,6 @@ class TicketPoller:
             "button:has-text('Siirry kassalle'), "
             "a:has-text('Siirry kassalle'), "
             "button:has-text('Tilaa nyt'), "
-            "button:has-text('Osta liput'), "
-            "button:has-text('Varaa'), "
-            "[data-bdd='offer-card-buy-button'], "
             "[data-bdd='basket-checkout-button']"
         ).first
         return checkout_button.is_visible()
@@ -271,8 +269,10 @@ class TicketPoller:
                             rect.top >= 0 &&
                             rect.right <= window.innerWidth &&
                             rect.bottom <= window.innerHeight;
-                        const isTopmost = inViewport &&
-                            document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2) === seat;
+                        const hit = inViewport
+                            ? document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2)
+                            : null;
+                        const isClickableOnMap = inViewport && hit && hit.closest("[data-component='svg']") !== null;
 
                         const fill = getComputedStyle(seat).fill;
                         const block = seat.closest("[data-component='svg__block'], [data-section-name]");
@@ -284,7 +284,7 @@ class TicketPoller:
                             block ? block.getAttribute("aria-label") : null,
                         ].filter(Boolean).join(" ").toLowerCase();
                         const isAvailable =
-                            isTopmost &&
+                            isClickableOnMap &&
                             seat.hasAttribute("type") &&
                             fill === "rgb(42, 85, 217)" &&
                             !excludeKeywords.some(k => seatMeta.includes(k));
@@ -325,7 +325,7 @@ class TicketPoller:
             },
         )
 
-    def _click_seat_ids(self, seat_ids: List[str]) -> int:
+    def _click_seat_ids(self, seat_ids: List[str]) -> Tuple[int, bool]:
         logging.info(f"Found {len(seat_ids)} adjacent available seats to select.")
         selected = 0
         for seat_id in seat_ids:
@@ -333,12 +333,29 @@ class TicketPoller:
             if not seat.is_visible():
                 continue
 
+            box = seat.bounding_box()
+            if not box:
+                continue
+
             seat_name = seat.get_attribute("data-seat-name") or seat_id
             logging.info(f"Clicking adjacent seat {selected + 1}/{self.config.ticket_quantity} (seat {seat_name})...")
-            if HumanInteractor.move_and_click(self.page, seat):
+            if HumanInteractor.move_and_click_point(
+                self.page,
+                box["x"] + box["width"] / 2,
+                box["y"] + box["height"] / 2,
+            ):
                 selected += 1
-                time.sleep(random.uniform(0.35, 0.65))
-        return selected
+                time.sleep(random.uniform(0.45, 0.75))
+
+                details = self.get_selected_ticket_details()
+                matched_excluded = [kw for kw in self.config.exclude_keywords if kw in details["text"]]
+                if matched_excluded:
+                    logging.warning(
+                        f"Selected seat '{seat_name}' is restricted ({matched_excluded}). Clearing selection..."
+                    )
+                    self.clear_selected_tickets()
+                    return 0, True
+        return selected, False
 
     def select_two_seats(self) -> int:
         if self.is_map_zoomed_in():
@@ -346,11 +363,13 @@ class TicketPoller:
             self.click_reset_zoom()
 
         zones = self.find_blue_zones()
+        if not zones and self.click_reset_zoom():
+            zones = self.find_blue_zones()
         logging.info(f"Detected {len(zones)} blue zone(s) on venue map.")
         tried_keys = set()
 
         for zone in zones:
-            if zone["key"] in tried_keys:
+            if zone["key"] in tried_keys or zone["key"] in self.restricted_zone_keys:
                 continue
             tried_keys.add(zone["key"])
 
@@ -365,7 +384,17 @@ class TicketPoller:
                 target_zone_key=zone["key"],
             )
             if len(seat_ids) >= self.config.ticket_quantity:
-                return self._click_seat_ids(seat_ids)
+                clicked, was_restricted = self._click_seat_ids(seat_ids)
+                if was_restricted:
+                    self.restricted_zone_keys.add(zone["key"])
+                    logging.info(f"Marked zone '{zone_label}' ({zone['key']}) as restricted; will skip in future scans.")
+                    self.click_reset_zoom()
+                    continue
+                if clicked >= self.config.ticket_quantity:
+                    return clicked
+                logging.info(f"Zone '{zone_label}' selection incomplete. Resetting zoom...")
+                self.click_reset_zoom()
+                continue
 
             logging.info(f"Zone '{zone_label}' has no {self.config.ticket_quantity} adjacent seats. Resetting zoom...")
             self.click_reset_zoom()
@@ -391,6 +420,10 @@ class TicketPoller:
 
     def clear_selected_tickets(self) -> None:
         remove_btns = self.page.locator(
+            "#list-view button:has-text('Remove ticket'), "
+            "#list-view button:has-text('Poista lippu'), "
+            "[data-testid='ticket-cart'] button:has-text('Remove ticket'), "
+            "[data-testid='ticket-cart'] button:has-text('Poista lippu'), "
             "[data-testid='ticket-cart'] button[aria-label*='Remove' i], "
             "[data-testid='ticket-cart'] button[aria-label*='Poista' i], "
             "#list-view button[aria-label*='Remove' i], "
@@ -398,7 +431,7 @@ class TicketPoller:
         )
         while remove_btns.count() > 0 and remove_btns.first.is_visible():
             HumanInteractor.move_and_click(self.page, remove_btns.first)
-            time.sleep(0.5)
+            time.sleep(0.6)
 
     def click_get_tickets(self) -> bool:
         get_tickets_btn = self.page.locator(
@@ -426,22 +459,25 @@ class TicketPoller:
         self.ensure_seat_map_tab_active()
 
         details = self.get_selected_ticket_details()
+        if details["count"] > 0:
+            matched_excluded = [kw for kw in self.config.exclude_keywords if kw in details["text"]]
+            if matched_excluded:
+                logging.warning(
+                    f"Existing selection contains excluded label(s) {matched_excluded}. Clearing selection..."
+                )
+                self.clear_selected_tickets()
+                details = self.get_selected_ticket_details()
+
         if details["count"] < self.config.ticket_quantity:
             if details["count"] > 0:
-                logging.info(f"Only {details['count']} ticket(s) currently selected (need {self.config.ticket_quantity}). Selecting seats...")
+                logging.info(f"Only {details['count']} ticket(s) currently selected. Clearing partial selection...")
+                self.clear_selected_tickets()
             picked = self.select_two_seats()
             if picked < self.config.ticket_quantity:
                 logging.info(f"Only found {picked} adjacent seats. Waiting for next scan...")
                 return False
 
         verified = self.get_selected_ticket_details()
-        if verified["count"] != self.config.ticket_quantity:
-            logging.warning(
-                f"'Your selection' shows x{verified['count']} instead of x{self.config.ticket_quantity}. "
-                "Not clicking 'Get Tickets'."
-            )
-            return False
-
         matched_excluded = [kw for kw in self.config.exclude_keywords if kw in verified["text"]]
         if matched_excluded:
             logging.warning(
@@ -450,6 +486,15 @@ class TicketPoller:
             )
             self.clear_selected_tickets()
             self.click_reset_zoom()
+            return False
+
+        if verified["count"] != self.config.ticket_quantity:
+            logging.warning(
+                f"'Your selection' shows x{verified['count']} instead of x{self.config.ticket_quantity}. "
+                "Clearing selection and not clicking 'Get Tickets'."
+            )
+            if verified["count"] > 0:
+                self.clear_selected_tickets()
             return False
 
         logging.info(f"Verified selection count: x{verified['count']} (all-ages / non-excluded). Proceeding to 'Get Tickets'...")
