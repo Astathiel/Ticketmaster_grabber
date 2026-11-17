@@ -19,6 +19,8 @@ class SniperConfig:
     ticket_quantity: int = 2
     min_jitter_seconds: float = 3.6
     max_jitter_seconds: float = 7.2
+    min_poll_sleep_seconds: float = 0.001
+    max_poll_sleep_seconds: float = 0.002
     exclude_keywords: Tuple[str, ...] = (
         "vip", "platinum", "hot ticket", "paketti",
         "k18", "k-18", "k 18", "18+", "anniskelu", "ikäraja 18",
@@ -175,10 +177,12 @@ class TicketPoller:
         )
 
     def find_blue_zones(self) -> List[dict]:
-        return self.page.evaluate(
+        result = self.page.evaluate(
             """({ excludeKeywords }) => {
                 const seen = new Set();
+                const seenSkipped = new Set();
                 const zones = [];
+                const skippedZones = [];
                 const elements = document.querySelectorAll("svg [data-component='svg__section'][data-active='true']");
 
                 for (const el of elements) {
@@ -196,34 +200,48 @@ class TicketPoller:
                     const isBlue = r < 100 && g < 140 && b > 170 && b > r * 1.8;
                     if (!isBlue) continue;
 
+                    const key =
+                        el.getAttribute("data-section-id") ||
+                        el.getAttribute("data-section-name") ||
+                        `${Math.round(rect.left)}:${Math.round(rect.top)}`;
+                    const name = el.getAttribute("data-section-name") || key;
+
                     const zoneText = [
                         el.getAttribute("data-section-name"),
                         el.getAttribute("aria-label"),
                         el.getAttribute("title"),
                     ].filter(Boolean).join(" ").toLowerCase();
-                    if (excludeKeywords.some(k => zoneText.includes(k))) continue;
+                    const matchedKeywords = excludeKeywords.filter(k => zoneText.includes(k));
+                    if (matchedKeywords.length > 0) {
+                        if (!seenSkipped.has(key)) {
+                            seenSkipped.add(key);
+                            skippedZones.push({ name, keywords: matchedKeywords });
+                        }
+                        continue;
+                    }
 
-                    const key =
-                        el.getAttribute("data-section-id") ||
-                        el.getAttribute("data-section-name") ||
-                        `${Math.round(rect.left)}:${Math.round(rect.top)}`;
                     if (seen.has(key)) continue;
                     seen.add(key);
 
                     zones.push({
                         key,
-                        name: el.getAttribute("data-section-name") || key,
+                        name,
                         x: rect.left + rect.width / 2,
                         y: rect.top + rect.height / 2,
                     });
                 }
-                return zones;
+                return { zones, skippedZones };
             }""",
             {"excludeKeywords": list(self.config.exclude_keywords)},
         )
+        for skipped in result["skippedZones"]:
+            logging.info(
+                f"Skipping restricted/excluded zone '{skipped['name']}' (matched: {skipped['keywords']})."
+            )
+        return result["zones"]
 
     def find_adjacent_seat_ids(self, quantity: int, target_zone_key: Optional[str] = None) -> List[str]:
-        return self.page.evaluate(
+        result = self.page.evaluate(
             """({ quantity, excludeKeywords, targetZoneKey }) => {
                 const allSeats = Array.from(document.querySelectorAll("svg circle[data-component='svg__seat']"));
                 const hasZoneMatch = targetZoneKey
@@ -255,6 +273,10 @@ class TicketPoller:
                     rows.get(parent).push(el);
                 }
 
+                const matchedKeywordsSet = new Set();
+                const sampleSkippedSeats = [];
+                let skippedCount = 0;
+
                 for (const seats of rows.values()) {
                     seats.sort((a, b) => parseFloat(a.getAttribute("cx") || "0") - parseFloat(b.getAttribute("cx") || "0"));
                     let run = [];
@@ -283,11 +305,20 @@ class TicketPoller:
                             block ? block.getAttribute("data-section-name") : null,
                             block ? block.getAttribute("aria-label") : null,
                         ].filter(Boolean).join(" ").toLowerCase();
-                        const isAvailable =
-                            isClickableOnMap &&
-                            seat.hasAttribute("type") &&
-                            fill === "rgb(42, 85, 217)" &&
-                            !excludeKeywords.some(k => seatMeta.includes(k));
+                        const matchedKeywords = excludeKeywords.filter(k => seatMeta.includes(k));
+                        const isBlueSeat = isClickableOnMap && seat.hasAttribute("type") && fill === "rgb(42, 85, 217)";
+
+                        if (isBlueSeat && matchedKeywords.length > 0) {
+                            skippedCount += 1;
+                            for (const kw of matchedKeywords) matchedKeywordsSet.add(kw);
+                            if (sampleSkippedSeats.length < 3) {
+                                sampleSkippedSeats.push(
+                                    seat.getAttribute("data-seat-name") || seat.getAttribute("id") || "unknown"
+                                );
+                            }
+                        }
+
+                        const isAvailable = isBlueSeat && matchedKeywords.length === 0;
 
                         if (!isAvailable) {
                             run = [];
@@ -312,11 +343,21 @@ class TicketPoller:
                         prevSeat = seat;
 
                         if (run.length === quantity) {
-                            return run.map(s => s.getAttribute("id")).filter(Boolean);
+                            return {
+                                seatIds: run.map(s => s.getAttribute("id")).filter(Boolean),
+                                skippedCount,
+                                matchedKeywords: Array.from(matchedKeywordsSet),
+                                sampleSkippedSeats,
+                            };
                         }
                     }
                 }
-                return [];
+                return {
+                    seatIds: [],
+                    skippedCount,
+                    matchedKeywords: Array.from(matchedKeywordsSet),
+                    sampleSkippedSeats,
+                };
             }""",
             {
                 "quantity": quantity,
@@ -324,6 +365,12 @@ class TicketPoller:
                 "targetZoneKey": target_zone_key,
             },
         )
+        if result["skippedCount"] > 0:
+            logging.info(
+                f"Skipped {result['skippedCount']} restricted/excluded seat(s) "
+                f"(matched: {result['matchedKeywords']}, samples: {result['sampleSkippedSeats']})."
+            )
+        return result["seatIds"]
 
     def _click_seat_ids(self, seat_ids: List[str]) -> Tuple[int, bool]:
         logging.info(f"Found {len(seat_ids)} adjacent available seats to select.")
@@ -516,10 +563,10 @@ class TicketPoller:
                 break
 
             sleep_duration = random.uniform(
-                self.config.min_jitter_seconds,
-                self.config.max_jitter_seconds
+                self.config.min_poll_sleep_seconds,
+                self.config.max_poll_sleep_seconds
             )
-            logging.info(f"No tickets yet. Waiting {sleep_duration:.2f}s")
+            logging.info(f"No tickets yet. Waiting {sleep_duration * 1000:.2f}ms")
             time.sleep(sleep_duration)
             attempt += 1
 
