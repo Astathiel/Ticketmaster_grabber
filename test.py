@@ -103,18 +103,22 @@ class MapSeatPoller:
         return checkout_button.is_visible()
 
     def ensure_seat_map_tab_active(self) -> None:
-        seat_map_tab = self.page.locator(
+        seat_map_btn = self.page.locator(
             "button:has-text('View seat map'), "
+            "a:has-text('View seat map'), "
+            "[role='button']:has-text('View seat map'), "
             "button:has-text('Näytä pohjakartta'), "
+            "a:has-text('Näytä pohjakartta'), "
             "[role='tab']:has-text('seat map')"
         ).first
 
-        if seat_map_tab.is_visible():
-            is_selected = seat_map_tab.get_attribute("aria-selected")
-            if is_selected == "false":
-                logging.info("Switching to 'View seat map' tab...")
-                HumanInteractor.move_and_click(self.page, seat_map_tab)
-                time.sleep(1.5)
+        if seat_map_btn.is_visible():
+            is_selected = seat_map_btn.get_attribute("aria-selected")
+            map_visible = self.page.locator("[data-component='zoomer'], svg [data-component='svg__section']").first.is_visible()
+            if is_selected != "true" and not (is_selected is None and map_visible):
+                logging.info("Clicking 'View seat map'...")
+                HumanInteractor.move_and_click(self.page, seat_map_btn)
+                time.sleep(2.0)
 
     def click_reset_zoom(self) -> bool:
         reset_btn = self.page.locator(
