@@ -350,23 +350,43 @@ class MapSeatPoller:
                 return True
         return False
 
+    def get_selected_ticket_count(self) -> int:
+        return self.page.evaluate(
+            """() => {
+                const cart = document.querySelector("[data-testid='ticket-cart'], [data-bdd='cart-count'], #list-view");
+                const text = (cart ? cart.innerText : document.body.innerText) || "";
+                const multMatch = text.match(/[×x]\\s*(\\d+)/i);
+                if (multMatch) return parseInt(multMatch[1], 10);
+                const wordMatch = text.match(/\\b(\\d+)\\s*(?:lippu|lippua|ticket|tickets)\\b/i);
+                if (wordMatch) return parseInt(wordMatch[1], 10);
+                return 0;
+            }"""
+        )
+
     def attempt_map_lock(self) -> bool:
         if self.is_in_basket():
             return True
 
         self.ensure_seat_map_tab_active()
 
-        selected_badge = self.page.locator(
-            "text=/\\b[1-9]\\s*lip|\\b[1-9]\\s*ticket/i"
-        ).or_(self.page.locator("[data-bdd='cart-count']"))
-        has_selection = selected_badge.count() > 0 or self.page.locator("button:has-text('Get Tickets'):enabled").count() > 0
-
-        if not has_selection:
+        current_count = self.get_selected_ticket_count()
+        if current_count < self.config.ticket_quantity:
+            if current_count > 0:
+                logging.info(f"Only {current_count} ticket(s) currently selected (need {self.config.ticket_quantity}). Selecting seats...")
             picked = self.select_two_seats()
             if picked < self.config.ticket_quantity:
                 logging.info(f"Only found {picked} seats. Zooming or repositioning...")
                 return False
 
+        verified_count = self.get_selected_ticket_count()
+        if verified_count != self.config.ticket_quantity:
+            logging.warning(
+                f"'Your selection' shows x{verified_count} instead of x{self.config.ticket_quantity}. "
+                "Not clicking 'Get Tickets'."
+            )
+            return False
+
+        logging.info(f"Verified selection count: x{verified_count}.")
         input("Paused before clicking 'Get Tickets'. Press Enter to continue (or Ctrl+C to stop)...")
         if self.click_get_tickets():
             if self.is_in_basket():
