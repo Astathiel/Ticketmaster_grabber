@@ -51,6 +51,16 @@ class BrowserConnector:
 
 class HumanInteractor:
     @staticmethod
+    def move_and_click_point(page: Page, target_x: float, target_y: float) -> bool:
+        try:
+            page.mouse.move(target_x, target_y, steps=random.randint(8, 18))
+            time.sleep(random.uniform(0.06, 0.16))
+            page.mouse.click(target_x, target_y)
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
     def move_and_click(page: Page, locator: Locator) -> bool:
         try:
             locator.wait_for(state="visible", timeout=2500)
@@ -58,10 +68,7 @@ class HumanInteractor:
             if box:
                 target_x = box["x"] + box["width"] * random.uniform(0.3, 0.7)
                 target_y = box["y"] + box["height"] * random.uniform(0.3, 0.7)
-                page.mouse.move(target_x, target_y, steps=random.randint(8, 18))
-                time.sleep(random.uniform(0.06, 0.16))
-                page.mouse.click(target_x, target_y)
-                return True
+                return HumanInteractor.move_and_click_point(page, target_x, target_y)
             locator.click()
             return True
         except Exception:
@@ -109,60 +116,219 @@ class MapSeatPoller:
                 HumanInteractor.move_and_click(self.page, seat_map_tab)
                 time.sleep(1.5)
 
-    def click_available_section_if_zoomed_out(self) -> bool:
-        available_sections = self.page.locator(
-            "svg g[data-bdd*='section'][data-available='true'], "
-            "svg path[data-bdd*='section']:not([fill='#E0E0E0']):not([fill='none']), "
-            "svg [aria-label*='section' i][aria-disabled='false'], "
-            "svg [aria-label*='katsomo' i]:not([aria-disabled='true'])"
-        )
-        if available_sections.count() > 0:
-            first_sec = available_sections.first
-            if first_sec.is_visible():
-                logging.info("Map zoomed out. Clicking into first available seating section...")
-                HumanInteractor.move_and_click(self.page, first_sec)
-                time.sleep(1.8)
+    def click_reset_zoom(self) -> bool:
+        reset_btn = self.page.locator(
+            "button:has-text('Reset Zoom'), "
+            "button:has-text('Nollaa'), "
+            "button[aria-label*='Reset Zoom' i], "
+            "button[title*='Reset Zoom' i]"
+        ).first
+        if reset_btn.is_visible() and reset_btn.is_enabled():
+            logging.info("Clicking 'Reset Zoom' to return to venue map...")
+            if HumanInteractor.move_and_click(self.page, reset_btn):
+                time.sleep(1.5)
                 return True
         return False
 
+    def find_blue_zones(self) -> List[dict]:
+        return self.page.evaluate(
+            """() => {
+                const seen = new Set();
+                const zones = [];
+                const elements = document.querySelectorAll("svg [data-component='svg__section'][data-active='true']");
+
+                for (const el of elements) {
+                    const rect = el.getBoundingClientRect();
+                    if (rect.width < 8 || rect.height < 8) continue;
+
+                    const style = getComputedStyle(el);
+                    if (style.display === "none" || style.visibility === "hidden" || style.pointerEvents === "none") {
+                        continue;
+                    }
+
+                    const match = style.fill.match(/rgba?\\((\\d+),\\s*(\\d+),\\s*(\\d+)/);
+                    if (!match) continue;
+                    const [r, g, b] = [Number(match[1]), Number(match[2]), Number(match[3])];
+                    const isBlue = r < 100 && g < 140 && b > 170 && b > r * 1.8;
+                    if (!isBlue) continue;
+
+                    const key =
+                        el.getAttribute("data-section-id") ||
+                        el.getAttribute("data-section-name") ||
+                        `${Math.round(rect.left)}:${Math.round(rect.top)}`;
+                    if (seen.has(key)) continue;
+                    seen.add(key);
+
+                    zones.push({
+                        key,
+                        name: el.getAttribute("data-section-name") || key,
+                        x: rect.left + rect.width / 2,
+                        y: rect.top + rect.height / 2,
+                    });
+                }
+                return zones;
+            }"""
+        )
+
+    def _click_seat_ids(self, seat_ids: List[str]) -> int:
+        logging.info(f"Found {len(seat_ids)} adjacent available seats to select.")
+        selected = 0
+        for seat_id in seat_ids:
+            seat = self.page.locator(f"svg circle[id='{seat_id}']")
+            if not seat.is_visible():
+                continue
+
+            seat_name = seat.get_attribute("data-seat-name") or seat_id
+            logging.info(f"Clicking adjacent seat {selected + 1}/{self.config.ticket_quantity} (seat {seat_name})...")
+            if HumanInteractor.move_and_click(self.page, seat):
+                selected += 1
+                time.sleep(random.uniform(0.35, 0.65))
+        return selected
+
     def find_available_seat_elements(self) -> Locator:
         return self.page.locator(
+            "svg circle[data-component='svg__seat'][type], "
             "svg circle[data-bdd*='seat'][data-available='true'], "
-            "svg circle:not([fill*='rgb(224']):not([fill='#e0e0e0']):not([fill='transparent']), "
             "svg [role='button'][aria-label*='Seat' i]:not([aria-disabled='true']), "
             "svg [role='button'][aria-label*='Paikka' i]:not([aria-disabled='true']), "
             "svg g[data-bdd='seat-node'][data-status='available']"
         )
 
+    def find_adjacent_seat_ids(self, quantity: int, target_zone_key: Optional[str] = None) -> List[str]:
+        return self.page.evaluate(
+            """({ quantity, excludeKeywords, targetZoneKey }) => {
+                const allSeats = Array.from(document.querySelectorAll("svg circle[data-component='svg__seat']"));
+                const hasZoneMatch = targetZoneKey
+                    ? allSeats.some(el => {
+                        const sec = el.closest("[data-section-id], [data-section-name], [id]");
+                        return sec && (
+                            sec.getAttribute("data-section-id") === targetZoneKey ||
+                            sec.getAttribute("data-section-name") === targetZoneKey ||
+                            sec.getAttribute("id") === targetZoneKey
+                        );
+                    })
+                    : false;
+
+                const rows = new Map();
+                for (const el of allSeats) {
+                    if (hasZoneMatch) {
+                        const sec = el.closest("[data-section-id], [data-section-name], [id]");
+                        const matchesZone = sec && (
+                            sec.getAttribute("data-section-id") === targetZoneKey ||
+                            sec.getAttribute("data-section-name") === targetZoneKey ||
+                            sec.getAttribute("id") === targetZoneKey
+                        );
+                        if (!matchesZone) continue;
+                    }
+
+                    const parent = el.parentElement;
+                    if (!parent) continue;
+                    if (!rows.has(parent)) rows.set(parent, []);
+                    rows.get(parent).push(el);
+                }
+
+                for (const seats of rows.values()) {
+                    seats.sort((a, b) => parseFloat(a.getAttribute("cx") || "0") - parseFloat(b.getAttribute("cx") || "0"));
+                    let run = [];
+                    let prevSeat = null;
+
+                    for (const seat of seats) {
+                        const rect = seat.getBoundingClientRect();
+                        const inViewport =
+                            rect.width > 0 &&
+                            rect.height > 0 &&
+                            rect.left >= 0 &&
+                            rect.top >= 0 &&
+                            rect.right <= window.innerWidth &&
+                            rect.bottom <= window.innerHeight;
+                        const isTopmost = inViewport &&
+                            document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2) === seat;
+
+                        const fill = getComputedStyle(seat).fill;
+                        const aria = (seat.getAttribute("aria-label") || "").toLowerCase();
+                        const isAvailable =
+                            isTopmost &&
+                            seat.hasAttribute("type") &&
+                            fill === "rgb(42, 85, 217)" &&
+                            !excludeKeywords.some(k => aria.includes(k));
+
+                        if (!isAvailable) {
+                            run = [];
+                            prevSeat = null;
+                            continue;
+                        }
+
+                        if (prevSeat) {
+                            const cx1 = parseFloat(prevSeat.getAttribute("cx") || "0");
+                            const cx2 = parseFloat(seat.getAttribute("cx") || "0");
+                            const cy1 = parseFloat(prevSeat.getAttribute("cy") || "0");
+                            const cy2 = parseFloat(seat.getAttribute("cy") || "0");
+                            const r = parseFloat(seat.getAttribute("r") || "14.5");
+                            if (Math.hypot(cx2 - cx1, cy2 - cy1) > r * 3.5) {
+                                run = [seat];
+                                prevSeat = seat;
+                                continue;
+                            }
+                        }
+
+                        run.push(seat);
+                        prevSeat = seat;
+
+                        if (run.length === quantity) {
+                            return run.map(s => s.getAttribute("id")).filter(Boolean);
+                        }
+                    }
+                }
+                return [];
+            }""",
+            {
+                "quantity": quantity,
+                "excludeKeywords": list(self.config.exclude_keywords),
+                "targetZoneKey": target_zone_key,
+            },
+        )
+
+    def is_map_zoomed_in(self) -> bool:
+        return self.page.evaluate(
+            """() => {
+                const inner = document.querySelector("[data-component='zoomer'] > div");
+                if (!inner) return false;
+                const m = (inner.style.transform || "").match(/scale3d\\(([^,]+),/);
+                return m ? parseFloat(m[1]) > 1.1 : false;
+            }"""
+        )
+
     def select_two_seats(self) -> int:
-        available_seats = self.find_available_seat_elements()
-        seat_count = available_seats.count()
-        logging.info(f"Detected {seat_count} potentially available seat elements in current view.")
+        if self.is_map_zoomed_in():
+            logging.info("Map is currently zoomed in. Resetting zoom to inspect blue zones...")
+            self.click_reset_zoom()
 
-        if seat_count < self.config.ticket_quantity:
-            self.click_available_section_if_zoomed_out()
-            available_seats = self.find_available_seat_elements()
-            seat_count = available_seats.count()
+        zones = self.find_blue_zones()
+        logging.info(f"Detected {len(zones)} blue zone(s) on venue map.")
+        tried_keys = set()
 
-        selected = 0
-        for i in range(seat_count):
-            if selected >= self.config.ticket_quantity:
-                break
-
-            seat = available_seats.nth(i)
-            if not seat.is_visible():
+        for zone in zones:
+            if zone["key"] in tried_keys:
                 continue
+            tried_keys.add(zone["key"])
 
-            aria_text = (seat.get_attribute("aria-label") or "").lower()
-            if any(bad in aria_text for bad in self.config.exclude_keywords):
+            zone_label = zone.get("name", zone["key"])
+            logging.info(f"Clicking into blue zone '{zone_label}' ({zone['key']})...")
+            if not HumanInteractor.move_and_click_point(self.page, zone["x"], zone["y"]):
                 continue
+            time.sleep(1.8)
 
-            logging.info(f"Clicking seat {selected + 1}/{self.config.ticket_quantity}...")
-            if HumanInteractor.move_and_click(self.page, seat):
-                selected += 1
-                time.sleep(random.uniform(0.35, 0.65))
+            seat_ids = self.find_adjacent_seat_ids(
+                self.config.ticket_quantity,
+                target_zone_key=zone["key"],
+            )
+            if len(seat_ids) >= self.config.ticket_quantity:
+                return self._click_seat_ids(seat_ids)
 
-        return selected
+            logging.info(f"Zone '{zone_label}' has no {self.config.ticket_quantity} adjacent seats. Resetting zoom...")
+            self.click_reset_zoom()
+
+        return 0
 
     def click_get_tickets(self) -> bool:
         get_tickets_btn = self.page.locator(
@@ -197,6 +363,7 @@ class MapSeatPoller:
                 logging.info(f"Only found {picked} seats. Zooming or repositioning...")
                 return False
 
+        input("Paused before clicking 'Get Tickets'. Press Enter to continue (or Ctrl+C to stop)...")
         if self.click_get_tickets():
             if self.is_in_basket():
                 return True
