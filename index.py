@@ -21,7 +21,8 @@ class SniperConfig:
     max_jitter_seconds: float = 7.2
     exclude_keywords: Tuple[str, ...] = (
         "vip", "platinum", "hot ticket", "paketti",
-        "k18", "k-18", "kenttä", "permanto", "seisomapaikka",
+        "k18", "k-18", "k 18", "18+", "anniskelu", "ikäraja 18",
+        "kenttä", "permanto", "seisomapaikka",
         "golden circle", "pyörätuoli", "saattaja", "esteetön"
     )
     preferred_keywords: Tuple[str, ...] = (
@@ -177,7 +178,7 @@ class TicketPoller:
 
     def find_blue_zones(self) -> List[dict]:
         return self.page.evaluate(
-            """() => {
+            """({ excludeKeywords }) => {
                 const seen = new Set();
                 const zones = [];
                 const elements = document.querySelectorAll("svg [data-component='svg__section'][data-active='true']");
@@ -197,6 +198,13 @@ class TicketPoller:
                     const isBlue = r < 100 && g < 140 && b > 170 && b > r * 1.8;
                     if (!isBlue) continue;
 
+                    const zoneText = [
+                        el.getAttribute("data-section-name"),
+                        el.getAttribute("aria-label"),
+                        el.getAttribute("title"),
+                    ].filter(Boolean).join(" ").toLowerCase();
+                    if (excludeKeywords.some(k => zoneText.includes(k))) continue;
+
                     const key =
                         el.getAttribute("data-section-id") ||
                         el.getAttribute("data-section-name") ||
@@ -212,7 +220,8 @@ class TicketPoller:
                     });
                 }
                 return zones;
-            }"""
+            }""",
+            {"excludeKeywords": list(self.config.exclude_keywords)},
         )
 
     def find_adjacent_seat_ids(self, quantity: int, target_zone_key: Optional[str] = None) -> List[str]:
@@ -266,12 +275,19 @@ class TicketPoller:
                             document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2) === seat;
 
                         const fill = getComputedStyle(seat).fill;
-                        const aria = (seat.getAttribute("aria-label") || "").toLowerCase();
+                        const block = seat.closest("[data-component='svg__block'], [data-section-name]");
+                        const seatMeta = [
+                            seat.getAttribute("aria-label"),
+                            seat.getAttribute("title"),
+                            seat.getAttribute("data-ticket-type"),
+                            block ? block.getAttribute("data-section-name") : null,
+                            block ? block.getAttribute("aria-label") : null,
+                        ].filter(Boolean).join(" ").toLowerCase();
                         const isAvailable =
                             isTopmost &&
                             seat.hasAttribute("type") &&
                             fill === "rgb(42, 85, 217)" &&
-                            !excludeKeywords.some(k => aria.includes(k));
+                            !excludeKeywords.some(k => seatMeta.includes(k));
 
                         if (!isAvailable) {
                             run = [];
@@ -356,18 +372,33 @@ class TicketPoller:
 
         return 0
 
-    def get_selected_ticket_count(self) -> int:
+    def get_selected_ticket_details(self) -> dict:
         return self.page.evaluate(
             """() => {
                 const cart = document.querySelector("[data-testid='ticket-cart'], [data-bdd='cart-count'], #list-view");
                 const text = (cart ? cart.innerText : document.body.innerText) || "";
+                let count = 0;
                 const multMatch = text.match(/[×x]\\s*(\\d+)/i);
-                if (multMatch) return parseInt(multMatch[1], 10);
-                const wordMatch = text.match(/\\b(\\d+)\\s*(?:lippu|lippua|ticket|tickets)\\b/i);
-                if (wordMatch) return parseInt(wordMatch[1], 10);
-                return 0;
+                if (multMatch) {
+                    count = parseInt(multMatch[1], 10);
+                } else {
+                    const wordMatch = text.match(/\\b(\\d+)\\s*(?:lippu|lippua|ticket|tickets)\\b/i);
+                    if (wordMatch) count = parseInt(wordMatch[1], 10);
+                }
+                return { count, text: text.toLowerCase() };
             }"""
         )
+
+    def clear_selected_tickets(self) -> None:
+        remove_btns = self.page.locator(
+            "[data-testid='ticket-cart'] button[aria-label*='Remove' i], "
+            "[data-testid='ticket-cart'] button[aria-label*='Poista' i], "
+            "#list-view button[aria-label*='Remove' i], "
+            "#list-view button[aria-label*='Poista' i]"
+        )
+        while remove_btns.count() > 0 and remove_btns.first.is_visible():
+            HumanInteractor.move_and_click(self.page, remove_btns.first)
+            time.sleep(0.5)
 
     def click_get_tickets(self) -> bool:
         get_tickets_btn = self.page.locator(
@@ -394,24 +425,34 @@ class TicketPoller:
 
         self.ensure_seat_map_tab_active()
 
-        current_count = self.get_selected_ticket_count()
-        if current_count < self.config.ticket_quantity:
-            if current_count > 0:
-                logging.info(f"Only {current_count} ticket(s) currently selected (need {self.config.ticket_quantity}). Selecting seats...")
+        details = self.get_selected_ticket_details()
+        if details["count"] < self.config.ticket_quantity:
+            if details["count"] > 0:
+                logging.info(f"Only {details['count']} ticket(s) currently selected (need {self.config.ticket_quantity}). Selecting seats...")
             picked = self.select_two_seats()
             if picked < self.config.ticket_quantity:
                 logging.info(f"Only found {picked} adjacent seats. Waiting for next scan...")
                 return False
 
-        verified_count = self.get_selected_ticket_count()
-        if verified_count != self.config.ticket_quantity:
+        verified = self.get_selected_ticket_details()
+        if verified["count"] != self.config.ticket_quantity:
             logging.warning(
-                f"'Your selection' shows x{verified_count} instead of x{self.config.ticket_quantity}. "
+                f"'Your selection' shows x{verified['count']} instead of x{self.config.ticket_quantity}. "
                 "Not clicking 'Get Tickets'."
             )
             return False
 
-        logging.info(f"Verified selection count: x{verified_count}. Proceeding to 'Get Tickets'...")
+        matched_excluded = [kw for kw in self.config.exclude_keywords if kw in verified["text"]]
+        if matched_excluded:
+            logging.warning(
+                f"Selected tickets contain excluded label(s) {matched_excluded} (e.g. K-18 / restricted). "
+                "Clearing selection and skipping 'Get Tickets'..."
+            )
+            self.clear_selected_tickets()
+            self.click_reset_zoom()
+            return False
+
+        logging.info(f"Verified selection count: x{verified['count']} (all-ages / non-excluded). Proceeding to 'Get Tickets'...")
         if self.click_get_tickets():
             if self.is_in_basket():
                 return True
