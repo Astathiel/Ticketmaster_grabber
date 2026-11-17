@@ -85,7 +85,7 @@ Before executing any script, Chrome must be launched with remote debugging enabl
    & "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir="C:\chrome_tm_profile" "https://www.ticketmaster.fi/artist/foo-fighters-lippuja/2990"
    ```
 
-   (Or your own Chromium browser exe location)
+   _Note: Replace the path to `chrome.exe` with your actual Chrome installation directory if it differs from the default._
    _(Or run the same string without the leading `&` in Command Prompt / Windows Run `Win + R`)_
 
 3. Verify the CDP listener is active:
