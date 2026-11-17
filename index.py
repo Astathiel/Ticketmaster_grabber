@@ -89,7 +89,7 @@ class HumanInteractor:
 class BasketAlert:
     @staticmethod
     def trigger_alarm() -> None:
-        logging.info("FOO FIGHTERS TICKETS LOCKED IN BASKET! COMPLETE CHECKOUT NOW!")
+        logging.info("TICKETS LOCKED IN BASKET! COMPLETE CHECKOUT NOW!")
         for _ in range(8):
             winsound.Beep(1200, 350)
             winsound.Beep(1600, 350)
