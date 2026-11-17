@@ -245,13 +245,15 @@ class MapSeatPoller:
                             rect.top >= 0 &&
                             rect.right <= window.innerWidth &&
                             rect.bottom <= window.innerHeight;
-                        const isTopmost = inViewport &&
-                            document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2) === seat;
+                        const hit = inViewport
+                            ? document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2)
+                            : null;
+                        const isClickableOnMap = inViewport && hit && hit.closest("[data-component='svg']") !== null;
 
                         const fill = getComputedStyle(seat).fill;
                         const aria = (seat.getAttribute("aria-label") || "").toLowerCase();
                         const isAvailable =
-                            isTopmost &&
+                            isClickableOnMap &&
                             seat.hasAttribute("type") &&
                             fill === "rgb(42, 85, 217)" &&
                             !excludeKeywords.some(k => aria.includes(k));
