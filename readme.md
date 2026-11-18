@@ -28,9 +28,12 @@ Rather than running an isolated headless browser that triggers anti-bot telemetr
 ```text
 Ticketmaster_grabber/
 ├── .venv/                   # Python virtual environment (gitignored)
-├── index.py                 # Primary sniper (human-like mouse movement + SVG map flow)
-├── index_fast.py            # Low-latency variant (direct clicks, FastInteractor)
-├── requirements.txt         # Python dependencies (Playwright)
+├── gui_app.py               # Desktop GUI prototype (PySide6 + docked/embedded browser)
+├── sniper_engine.py         # Refactored CDP/search/seat-map engine & Win32 Chrome docker
+├── index.py                 # Primary CLI sniper (human-like mouse movement + SVG map flow)
+├── index_fast.py            # Low-latency CLI variant (direct clicks, FastInteractor)
+├── tests/                   # Unit tests for config, profile manager, and GUI prototype
+├── requirements.txt         # Python dependencies (Playwright, PySide6)
 ├── LICENSE                  # MIT License
 └── readme.md                # Project documentation and execution guide
 ```
@@ -162,3 +165,28 @@ The moment `is_in_basket()` confirms a checkout URL or checkout button:
 
 - **Logic Debugging:** When inspecting DOM selectors, SVG section keys, or seat counts, place breakpoints inside `attempt_seat_lock()` in `index.py` (or `index_fast.py`) and attach your IDE debugger.
 - **Live Monitoring:** Operational events, skipped zones/seats, poll attempts, and sleep intervals are logged via standard Python `logging` (`HH:MM:SS [LEVEL] message`).
+
+---
+
+## GUI Prototype (`gui_app.py`)
+
+An experimental desktop GUI prototype is available for testing browser embedding, interactive search, and live seat-filter configuration without editing Python files.
+
+### Launch the GUI
+
+```powershell
+.\.venv\Scripts\python.exe gui_app.py
+```
+
+### Features
+
+1. **Chrome Profile & Integrated Browser:**
+   - Set or browse your Chrome `--user-data-dir` (default `C:\chrome_tm_profile`) and click **Open Chrome Profile -> ticketmaster.fi** to launch Chrome on CDP port `9222`.
+   - **Docked Chrome (Inside App):** Embeds the genuine Chrome `--app` window inside the right-hand panel on Windows (`Win32ChromeDocker`), keeping real Chrome anti-bot fingerprints and cookies while fitting inside one window. You can also switch to **Embedded WebView (Qt)** or **External Chrome Window**, or use **Dock / Re-attach** and **Pop Out** at any time.
+2. **Band / Concert Search:**
+   - Enter a band, artist, concert name, or direct `ticketmaster.fi` event URL and click **Navigate / Find Event on Ticketmaster** (or start the search directly).
+3. **Ticket & Filter Config:**
+   - Configure **How many tickets** (`1`–`10`), **Next to each other** (adjacent vs. any available seats in a section), **Under 18 / All-Ages only** (toggles `K-18`/`18+` exclusions), VIP/Standing/Accessible toggles, **Preferred Keywords** (prioritizes matching blue sections first), **Custom Restricted Keywords**, and **Human Mouse / Fast Direct** click mode.
+   - Settings persist locally in `gui_settings.json` (gitignored).
+4. **Search for Ticket & Live Log:**
+   - Click **Search for Ticket** to run `UnifiedTicketPoller` in a background thread while monitoring real-time logs and status updates in the bottom console.
