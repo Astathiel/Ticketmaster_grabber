@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import random
+import re
 import shutil
 import subprocess
 import sys
@@ -540,37 +541,68 @@ class UnifiedTicketPoller:
         ).first
         return checkout_button.is_visible()
 
-    def search_and_navigate_to_event(self, query: str) -> bool:
-        """Navigate directly to an event URL or run a Ticketmaster Finland search."""
+    def is_on_matching_event_page(self, query: str) -> bool:
+        """Return True if the browser is already on an event page matching query."""
         cleaned = query.strip()
         if not cleaned:
             return False
+
+        current_url = self.page.url.lower()
+        if "/event/" not in current_url:
+            return False
+
+        if cleaned.lower().startswith(("http://", "https://")):
+            return current_url.rstrip("/") == cleaned.lower().rstrip("/")
+
+        tokens = [t for t in re.split(r"\W+", cleaned.lower()) if len(t) >= 2]
+        if not tokens:
+            return False
+
+        decoded_url = urllib.parse.unquote(current_url)
+        page_text = ""
+        try:
+            evaluated = self.page.evaluate(
+                "() => (document.title + ' ' + (document.querySelector('h1')?.innerText || '')).toLowerCase()"
+            )
+            if isinstance(evaluated, str):
+                page_text = evaluated
+        except Exception:
+            page_text = ""
+
+        haystack = f"{decoded_url} {page_text}"
+        return all(token in haystack for token in tokens)
+
+    def search_and_navigate_to_event(self, query: str) -> bool:
+        """Navigate directly to an event URL or return to main page and run a search."""
+        cleaned = query.strip()
+        if not cleaned:
+            return False
+
+        self.restricted_zone_keys.clear()
 
         if cleaned.lower().startswith(("http://", "https://")):
             logging.info("Navigating directly to event URL: %s", cleaned)
             self.page.goto(cleaned, wait_until="domcontentloaded", timeout=25000)
             return True
 
-        current_url = self.page.url.lower()
-        if "/event/" in current_url:
-            logging.info("Already on an event page (%s); skipping search.", self.page.url)
-            return False
-
-        if "/artist/" in current_url or "/music/" in current_url:
-            if self.navigate_from_artist_to_event_if_needed():
-                return True
+        main_url = "https://www.ticketmaster.fi"
+        logging.info(
+            "Navigating back to main page (%s) before searching for '%s'...",
+            main_url,
+            cleaned,
+        )
+        self.page.goto(main_url, wait_until="domcontentloaded", timeout=25000)
 
         search_url = (
             f"https://www.ticketmaster.fi/search?q={urllib.parse.quote_plus(cleaned)}"
         )
-        if "/search" not in current_url or urllib.parse.quote_plus(cleaned).lower() not in current_url:
-            logging.info("Searching Ticketmaster Finland for '%s'...", cleaned)
-            self.page.goto(search_url, wait_until="domcontentloaded", timeout=25000)
-            self._wait_js(
-                "() => !!document.querySelector(\"main a[href*='/event/'], main a[href*='/artist/'], a[data-testid='event-list-link']\")",
-                timeout_ms=4000,
-                poll_ms=100,
-            )
+        logging.info("Searching Ticketmaster Finland for '%s'...", cleaned)
+        self.page.goto(search_url, wait_until="domcontentloaded", timeout=25000)
+        self._wait_js(
+            "() => !!document.querySelector(\"main a[href*='/event/'], main a[href*='/artist/'], a[data-testid='event-list-link']\")",
+            timeout_ms=4000,
+            poll_ms=100,
+        )
 
         result_link = self.page.locator(
             "a[data-testid='event-list-link'], "
@@ -592,6 +624,9 @@ class UnifiedTicketPoller:
                 timeout_ms=4000,
                 poll_ms=100,
             )
+            post_url = self.page.url.lower()
+            if "/artist/" in post_url or "/music/" in post_url:
+                self.navigate_from_artist_to_event_if_needed()
             return True
 
         logging.warning("No clickable event link found yet for '%s'.", cleaned)

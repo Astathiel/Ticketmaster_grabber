@@ -271,7 +271,11 @@ if HAS_PYSIDE6:
 
                 if self.config.search_query.strip():
                     current = page.url.lower()
-                    if "/event/" not in current and "checkout" not in current:
+                    if (
+                        "checkout" not in current
+                        and not poller.is_in_basket()
+                        and not poller.is_on_matching_event_page(self.config.search_query)
+                    ):
                         self.status_changed.emit(
                             "SEARCHING",
                             f"Searching event: {self.config.search_query.strip()}",
@@ -900,10 +904,12 @@ if HAS_PYSIDE6:
                 if query.lower().startswith(("http://", "https://")):
                     self.webview.setUrl(QUrl(query))
                 else:
-                    self.webview.setUrl(
-                        QUrl(
-                            f"https://www.ticketmaster.fi/search?q={urllib.parse.quote_plus(query)}"
-                        )
+                    self.webview.setUrl(QUrl("https://www.ticketmaster.fi"))
+                    search_url = QUrl(
+                        f"https://www.ticketmaster.fi/search?q={urllib.parse.quote_plus(query)}"
+                    )
+                    QTimer.singleShot(
+                        400, lambda url=search_url: self.webview.setUrl(url)
                     )
                 return
 

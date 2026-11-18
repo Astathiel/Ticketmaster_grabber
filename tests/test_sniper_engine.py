@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from unittest.mock import MagicMock, call
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -11,6 +12,7 @@ from sniper_engine import (  # noqa: E402
     VIP_EXCLUDE_KEYWORDS,
     ChromeProfileManager,
     SniperConfig,
+    UnifiedTicketPoller,
 )
 
 
@@ -150,6 +152,84 @@ class TestGuiPrototypeWindow(unittest.TestCase):
                 self.assertIn("parveke", window.compiled_exclude_preview.text())
             finally:
                 window.close()
+
+
+class TestUnifiedTicketPollerSearch(unittest.TestCase):
+    @staticmethod
+    def _make_mock_page(initial_url: str, eval_text: str = "") -> MagicMock:
+        page = MagicMock()
+        page.url = initial_url
+        page.evaluate.return_value = eval_text
+
+        def _goto(url: str, **_kwargs) -> None:
+            page.url = url
+
+        page.goto.side_effect = _goto
+        page.locator.return_value.first.is_visible.return_value = True
+        return page
+
+    def test_search_from_existing_event_or_artist_goes_to_main_page_first(self) -> None:
+        for start_url in (
+            "https://www.ticketmaster.fi/event/coldplay-lippuja/12345",
+            "https://www.ticketmaster.fi/artist/coldplay-lippuja/999",
+        ):
+            with self.subTest(start_url=start_url):
+                page = self._make_mock_page(start_url)
+                poller = UnifiedTicketPoller(page, SniperConfig(fast_mode=True))
+                poller.restricted_zone_keys.add("sec-101")
+
+                moved = poller.search_and_navigate_to_event("Metallica")
+
+                self.assertTrue(moved)
+                self.assertEqual(poller.restricted_zone_keys, set())
+                self.assertEqual(
+                    page.goto.call_args_list,
+                    [
+                        call(
+                            "https://www.ticketmaster.fi",
+                            wait_until="domcontentloaded",
+                            timeout=25000,
+                        ),
+                        call(
+                            "https://www.ticketmaster.fi/search?q=Metallica",
+                            wait_until="domcontentloaded",
+                            timeout=25000,
+                        ),
+                    ],
+                )
+
+    def test_is_on_matching_event_page(self) -> None:
+        cases = [
+            (
+                "https://www.ticketmaster.fi/event/metallica-m72-world-tour/12345",
+                "",
+                "Metallica",
+                True,
+            ),
+            (
+                "https://www.ticketmaster.fi/event/coldplay-lippuja/12345",
+                "Coldplay - Music Of The Spheres",
+                "Metallica",
+                False,
+            ),
+            (
+                "https://www.ticketmaster.fi/artist/metallica/123",
+                "Metallica liput",
+                "Metallica",
+                False,
+            ),
+            (
+                "https://www.ticketmaster.fi/event/12345",
+                "metallica m72 world tour",
+                "Metallica",
+                True,
+            ),
+        ]
+        for url, eval_text, query, expected in cases:
+            with self.subTest(url=url, query=query):
+                page = self._make_mock_page(url, eval_text=eval_text)
+                poller = UnifiedTicketPoller(page, SniperConfig())
+                self.assertEqual(poller.is_on_matching_event_page(query), expected)
 
 
 if __name__ == "__main__":
